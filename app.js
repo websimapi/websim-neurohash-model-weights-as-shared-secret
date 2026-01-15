@@ -14,7 +14,7 @@ import {
     RefreshCw,
     Hash
 } from 'lucide-react';
-// Utilities are now loaded globally from utils.js
+import { cn, mineNonce, generateAIFingerprint } from './utils.js';
 
 // Setup WebsimSocket
 const room = new WebsimSocket();
@@ -83,7 +83,7 @@ function NavButton({ active, onClick, icon: Icon, label }) {
         <button 
             onClick={onClick}
             className={cn(
-                "flex items-center gap-3 px-4 py-3 rounded transition-all duration-200 font-mono text-sm border border-transparent",
+                "flex items-center gap-3 px-4 py-3 rounded transition-all duration-200 font-mono text-sm border border-transparent w-full",
                 active 
                     ? "bg-neon-blue/10 text-neon-blue border-neon-blue/30 shadow-[0_0_15px_rgba(0,243,255,0.2)]" 
                     : "hover:bg-white/5 text-gray-400 hover:text-white"
@@ -190,6 +190,8 @@ function MintView({ onSuccess }) {
             
             // 1. Mine Nonce
             const startTime = performance.now();
+            // Start mining with delay to allow UI render
+            await new Promise(r => setTimeout(r, 100));
             const { nonce, hash } = await mineNonce(data, 3); // difficulty 3
             const mineTime = (performance.now() - startTime).toFixed(2);
             addLog(`Nonce found: ${nonce} (${mineTime}ms)`);
@@ -210,7 +212,7 @@ function MintView({ onSuccess }) {
                 data,
                 nonce,
                 fingerprint,
-                model_version: 'gpt-4o-mini', // Conceptual versioning
+                model_version: 'gpt-4o-mini', 
                 raw_response_preview: raw.substring(0, 50)
             });
 
@@ -293,12 +295,7 @@ function VerifyView({ initialRecord }) {
             <div className="flex flex-col items-center justify-center h-full text-gray-500 gap-4">
                 <Search size={48} />
                 <p>Select a record from the Ledger to audit.</p>
-                <button 
-                    onClick={() => document.querySelector('button[aria-label="Ledger"]').click()}
-                    className="text-neon-blue hover:underline"
-                >
-                    Go to Ledger
-                </button>
+                <p className="text-xs text-gray-600">Click the "AUDIT" button on any row in the Ledger.</p>
             </div>
         );
     }

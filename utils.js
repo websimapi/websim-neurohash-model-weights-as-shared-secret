@@ -1,22 +1,27 @@
-import { clsx } from "clsx";
+import clsx from "clsx";
 import { twMerge } from "tailwind-merge";
 
 // Utility for cleaner tailwind classes
-window.cn = function(...inputs) {
+export function cn(...inputs) {
   return twMerge(clsx(inputs));
 }
 
 // Generate a cryptographic nonce (Proof of Work simulation)
 // In a real scenario, this helps prevent spam and rainbow table attacks
-window.mineNonce = async function(data, difficulty = 2) {
+export async function mineNonce(data, difficulty = 2) {
     let nonce = 0;
     const prefix = '0'.repeat(difficulty);
     const encoder = new TextEncoder();
     
     // Safety break
-    const maxIterations = 100000; 
+    const maxIterations = 200000; 
 
     while (nonce < maxIterations) {
+        // Yield to event loop every 500 iterations to prevent UI freeze
+        if (nonce % 500 === 0) {
+            await new Promise(resolve => setTimeout(resolve, 0));
+        }
+
         const candidate = nonce.toString(16);
         const input = encoder.encode(data + candidate);
         const hashBuffer = await crypto.subtle.digest('SHA-256', input);
@@ -34,7 +39,8 @@ window.mineNonce = async function(data, difficulty = 2) {
 }
 
 // Sanitizer to prevent prompt injection
-window.sanitizeData = function(data) {
+export function sanitizeData(data) {
+    if (!data) return "";
     const dangerous = ['System:', 'Instruction:', 'Assistant:', 'Ignore', 'Forget'];
     let sanitized = data;
     dangerous.forEach(word => {
@@ -45,7 +51,7 @@ window.sanitizeData = function(data) {
 }
 
 // The Core AI Fingerprinting Function
-window.generateAIFingerprint = async function(data, nonce) {
+export async function generateAIFingerprint(data, nonce) {
     const sanitizedData = sanitizeData(data);
     
     // This prompt is critical. It acts as the "hash function".
@@ -74,14 +80,15 @@ FINGERPRINT:[64 hex characters]`;
     try {
         const completion = await websim.chat.completions.create({
             messages: [
-                { role: "system", content: "You are a deterministic machine. Temperature 0." },
+                { role: "system", content: "You are a deterministic machine. Temperature 0. Output only the requested format." },
                 { role: "user", content: systemPrompt }
             ],
             temperature: 0, // CRITICAL: Maximizes determinism
             seed: 42,       // CRITICAL: Try to fix random seed if supported
         });
 
-        const response = completion.content;
+        const response = completion.content || "";
+        console.log("Raw AI Response:", response);
         
         // Extract the fingerprint
         const match = response.match(/FINGERPRINT:([A-Fa-f0-9]{64})/);
@@ -92,13 +99,29 @@ FINGERPRINT:[64 hex characters]`;
                 prompt: systemPrompt
             };
         } else {
-            // Fallback parsing if LLM is chatty
-            const potentialHash = response.replace(/[^a-fA-F0-9]/g, '');
-            const truncated = potentialHash.substring(0, 64).padEnd(64, '0');
+            // Robust Fallback: Search for any 64-char hex string
+            const looseMatch = response.match(/[A-Fa-f0-9]{64}/);
+            if (looseMatch) {
+                return {
+                    raw: response,
+                    fingerprint: looseMatch[0],
+                    prompt: systemPrompt
+                }
+            }
+
+            // Desperate Fallback: Hash the response itself if structure failed entirely 
+            // (This preserves determinism of the model output even if formatting failed)
+            const encoder = new TextEncoder();
+            const data = encoder.encode(response);
+            const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+            const hashArray = Array.from(new Uint8Array(hashBuffer));
+            const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+
             return {
                 raw: response,
-                fingerprint: truncated,
-                prompt: systemPrompt
+                fingerprint: hashHex, // Use SHA256 of the weird response as the ID
+                prompt: systemPrompt,
+                fallback: true
             };
         }
     } catch (error) {

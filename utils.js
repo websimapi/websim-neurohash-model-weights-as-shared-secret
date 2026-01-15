@@ -2,13 +2,13 @@ import { clsx } from "clsx";
 import { twMerge } from "tailwind-merge";
 
 // Utility for cleaner tailwind classes
-export function cn(...inputs) {
+window.cn = function(...inputs) {
   return twMerge(clsx(inputs));
 }
 
 // Generate a cryptographic nonce (Proof of Work simulation)
 // In a real scenario, this helps prevent spam and rainbow table attacks
-export async function mineNonce(data, difficulty = 2) {
+window.mineNonce = async function(data, difficulty = 2) {
     let nonce = 0;
     const prefix = '0'.repeat(difficulty);
     const encoder = new TextEncoder();
@@ -34,7 +34,7 @@ export async function mineNonce(data, difficulty = 2) {
 }
 
 // Sanitizer to prevent prompt injection
-export function sanitizeData(data) {
+window.sanitizeData = function(data) {
     const dangerous = ['System:', 'Instruction:', 'Assistant:', 'Ignore', 'Forget'];
     let sanitized = data;
     dangerous.forEach(word => {
@@ -45,7 +45,7 @@ export function sanitizeData(data) {
 }
 
 // The Core AI Fingerprinting Function
-export async function generateAIFingerprint(data, nonce) {
+window.generateAIFingerprint = async function(data, nonce) {
     const sanitizedData = sanitizeData(data);
     
     // This prompt is critical. It acts as the "hash function".

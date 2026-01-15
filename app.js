@@ -14,7 +14,7 @@ import {
     RefreshCw,
     Hash
 } from 'lucide-react';
-import { cn, mineNonce, generateAIFingerprint, sanitizeData } from './utils.js';
+// Utilities are now loaded globally from utils.js
 
 // Setup WebsimSocket
 const room = new WebsimSocket();

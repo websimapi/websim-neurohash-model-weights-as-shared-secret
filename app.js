@@ -14,7 +14,91 @@ import {
     RefreshCw,
     Hash
 } from 'lucide-react';
-import { cn, mineNonce, generateAIFingerprint } from './utils.js';
+import { clsx } from 'clsx';
+import { twMerge } from 'tailwind-merge';
+
+// --- UTILITIES (Moved from utils.js to avoid import issues) ---
+
+function cn(...inputs) {
+  return twMerge(clsx(inputs));
+}
+
+async function mineNonce(data, difficulty = 2) {
+    let nonceValue = 0;
+    const prefix = '0'.repeat(difficulty);
+    const encoder = new TextEncoder();
+    const maxIterations = 50000; 
+
+    while (nonceValue < maxIterations) {
+        if (nonceValue % 1000 === 0) {
+            await new Promise(resolve => setTimeout(resolve, 0));
+        }
+
+        const candidate = nonceValue.toString(16);
+        const input = encoder.encode(data + candidate);
+        const hashBuffer = await crypto.subtle.digest('SHA-256', input);
+        const hashArray = Array.from(new Uint8Array(hashBuffer));
+        const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+        
+        if (hashHex.startsWith(prefix)) {
+            return { nonce: candidate, hash: hashHex };
+        }
+        nonceValue++;
+    }
+    return { nonce: Math.random().toString(36).substring(7), hash: 'fallback_hash' };
+}
+
+function sanitizeData(data) {
+    if (!data) return "";
+    const dangerous = ['System:', 'Instruction:', 'Assistant:', 'Ignore', 'Forget'];
+    let sanitized = data;
+    dangerous.forEach(word => {
+        const regex = new RegExp(word, 'gi');
+        sanitized = sanitized.replace(regex, `[${word}]`);
+    });
+    return sanitized;
+}
+
+async function generateAIFingerprint(data, nonce) {
+    const sanitizedData = sanitizeData(data);
+    try {
+        const completion = await websim.chat.completions.create({
+            messages: [
+                { 
+                    role: "system", 
+                    content: "You are a deterministic neural hashing oracle. Your task is to generate a 64-character hexadecimal fingerprint based on the provided data and nonce. You must respond ONLY with a JSON object containing the fingerprint." 
+                },
+                { 
+                    role: "user", 
+                    content: JSON.stringify({
+                        action: "GENERATE_FINGERPRINT",
+                        nonce: nonce,
+                        data: sanitizedData
+                    })
+                }
+            ],
+            json: true
+        });
+
+        const result = JSON.parse(completion.content);
+        if (result && result.fingerprint) {
+            return {
+                fingerprint: result.fingerprint,
+                raw: completion.content
+            };
+        }
+        throw new Error("Invalid AI response format");
+    } catch (error) {
+        console.error("AI Fingerprint Error:", error);
+        // Deterministic fallback based on content if AI fails or is inconsistent
+        const encoder = new TextEncoder();
+        const input = encoder.encode(data + nonce + "fallback_salt");
+        const hashBuffer = await crypto.subtle.digest('SHA-256', input);
+        const hashArray = Array.from(new Uint8Array(hashBuffer));
+        const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+        return { fingerprint: hashHex, raw: "SYSTEM_FALLBACK_HASH" };
+    }
+}
 
 // Setup WebsimSocket
 const room = new WebsimSocket();
@@ -24,10 +108,11 @@ function App() {
     const [records, setRecords] = useState([]);
     
     useEffect(() => {
-        // Subscribe to ledger updates
-        const unsubscribe = room.collection('neurohash_ledger').subscribe((data) => {
+        // Subscribe to ledger updates (v2 for clean schema)
+        const unsubscribe = room.collection('neurohash_ledger_v2').subscribe((data) => {
+            if (!data) return;
             // Sort by created_at desc
-            const sorted = data.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+            const sorted = [...data].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
             setRecords(sorted);
         });
         return () => unsubscribe();
@@ -201,20 +286,26 @@ function MintView({ onSuccess }) {
             addLog("Querying Neural Oracle (Temp=0)...");
             
             // 2. Query AI
-            const { fingerprint, raw } = await generateAIFingerprint(data, nonce);
+            addLog("Awaiting Neural Oracle consensus...");
+            const result = await generateAIFingerprint(data, nonce);
+            const fingerprint = result.fingerprint;
+            const raw = result.raw || "";
+            
             addLog(`Fingerprint generated: ${fingerprint.substring(0, 16)}...`);
             
             setStatus("saving");
             addLog("Committing to ledger...");
 
             // 3. Save
-            await room.collection('neurohash_ledger').create({
+            const record = await room.collection('neurohash_ledger_v2').create({
                 data,
                 nonce,
                 fingerprint,
                 model_version: 'gpt-4o-mini', 
-                raw_response_preview: raw.substring(0, 50)
+                raw_response_preview: typeof raw === 'string' ? raw.substring(0, 50) : "JSON_DATA"
             });
+            
+            if (!record) throw new Error("Database commit failed");
 
             addLog("SUCCESS: Block committed.");
             setTimeout(() => {

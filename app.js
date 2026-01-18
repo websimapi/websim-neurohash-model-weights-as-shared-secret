@@ -31,14 +31,15 @@ async function mineNonce(data, difficulty = 2, onProgress) {
     let nonceValue = 0;
     const prefix = '0'.repeat(difficulty);
     const encoder = new TextEncoder();
-    const batchSize = 1000;
-    const maxIterations = 1000000; // Increased limit
+    const batchSize = 100; // Reduced batch size for better UI responsiveness
+    const maxIterations = 1000000;
 
     while (nonceValue < maxIterations) {
         // Non-blocking yield
         if (nonceValue % batchSize === 0) {
             if (onProgress) onProgress(nonceValue);
-            await new Promise(resolve => setTimeout(resolve, 0));
+            // Slightly longer timeout to ensure paint
+            await new Promise(resolve => setTimeout(resolve, 1));
         }
 
         const candidate = nonceValue.toString(16);
@@ -168,10 +169,9 @@ function App() {
     const [records, setRecords] = useState([]);
     
     useEffect(() => {
-        // Subscribe to ledger updates (v3 for new consensus fields)
+        // Subscribe to ledger updates
         const unsubscribe = room.collection('neurohash_ledger_v3').subscribe((data) => {
             if (!data) return;
-            // Sort by created_at desc
             const sorted = [...data].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
             setRecords(sorted);
         });
@@ -179,10 +179,10 @@ function App() {
     }, []);
 
     return (
-        <div className="min-h-screen flex flex-col md:flex-row max-w-7xl mx-auto p-4 gap-4">
+        <div className="h-full flex flex-col md:flex-row max-w-7xl mx-auto p-2 md:p-4 gap-4 overflow-hidden">
             {/* Sidebar Navigation */}
-            <nav className="w-full md:w-64 flex flex-col gap-2 p-4 bg-panel-bg rounded-lg border border-subtle-border h-fit sticky top-4">
-                <div className="flex items-center gap-3 mb-6 px-2">
+            <nav className="w-full md:w-64 flex-shrink-0 flex md:flex-col gap-2 p-2 md:p-4 bg-panel-bg rounded-lg border border-subtle-border md:h-full overflow-x-auto">
+                <div className="hidden md:flex items-center gap-3 mb-6 px-2">
                     <div className="relative">
                         <Cpu className="w-8 h-8 text-neon-blue" />
                         <div className="absolute inset-0 bg-neon-blue blur-lg opacity-40"></div>
@@ -193,35 +193,38 @@ function App() {
                     </div>
                 </div>
 
-                <NavButton active={view === 'ledger'} onClick={() => setView('ledger')} icon={Database} label="Ledger" />
-                <NavButton active={view === 'mint'} onClick={() => setView('mint')} icon={Lock} label="Mint Data" />
-                <NavButton active={view === 'verify'} onClick={() => setView('verify')} icon={Search} label="Verify / Audit" />
-                <NavButton active={view === 'analysis'} onClick={() => setView('analysis')} icon={Activity} label="Research Lab" />
+                <div className="flex md:flex-col gap-2 w-full">
+                    <NavButton active={view === 'ledger'} onClick={() => setView('ledger')} icon={Database} label="Ledger" />
+                    <NavButton active={view === 'mint'} onClick={() => setView('mint')} icon={Lock} label="Mint" />
+                    <NavButton active={view === 'verify'} onClick={() => setView('verify')} icon={Search} label="Verify" />
+                    <NavButton active={view === 'analysis'} onClick={() => setView('analysis')} icon={Activity} label="Lab" />
+                </div>
 
-                <div className="mt-auto pt-8 text-xs text-gray-600 font-mono space-y-2">
+                <div className="hidden md:block mt-auto pt-8 text-xs text-gray-600 font-mono space-y-2">
                     <p>Network: <span className="text-neon-green">ONLINE</span></p>
-                    <p>Model: GPT-4o-Mini (Temp 0)</p>
+                    <p>Model: GPT-4o-Mini</p>
                     <div className="h-px bg-subtle-border w-full my-2"></div>
                     <p className="text-[10px] text-gray-500">
-                        Using Neural Consensus Protocol (NCP) v1.2
+                        NCP v1.2 Active
                     </p>
                 </div>
             </nav>
 
             {/* Main Content Area */}
-            <main className="flex-1 bg-panel-bg rounded-lg border border-subtle-border p-6 min-h-[600px] relative overflow-hidden flex flex-col">
+            <main className="flex-1 bg-panel-bg rounded-lg border border-subtle-border p-4 md:p-6 relative overflow-hidden flex flex-col h-full">
                 <div className="scan-line"></div>
-                
-                {view === 'ledger' && <LedgerView records={records} onVerify={(r) => {
-                    window.selectedRecord = r; 
-                    setView('verify');
-                }} />}
-                
-                {view === 'mint' && <MintView onSuccess={() => setView('ledger')} />}
-                
-                {view === 'verify' && <VerifyView initialRecord={window.selectedRecord} />}
-                
-                {view === 'analysis' && <AnalysisView />}
+                <div className="flex-1 overflow-y-auto custom-scrollbar pr-2">
+                    {view === 'ledger' && <LedgerView records={records} onVerify={(r) => {
+                        window.selectedRecord = r; 
+                        setView('verify');
+                    }} />}
+                    
+                    {view === 'mint' && <MintView onSuccess={() => setView('ledger')} />}
+                    
+                    {view === 'verify' && <VerifyView initialRecord={window.selectedRecord} />}
+                    
+                    {view === 'analysis' && <AnalysisView />}
+                </div>
             </main>
         </div>
     );
@@ -328,20 +331,30 @@ function MintView({ onSuccess }) {
     const [logs, setLogs] = useState([]);
     const [securityLevel, setSecurityLevel] = useState("high"); // standard, high, maximum
     const [progress, setProgress] = useState(0);
+    const logContainerRef = useRef(null);
 
     const addLog = (msg) => setLogs(prev => [...prev, `> ${msg}`]);
+
+    // Auto-scroll logs
+    useEffect(() => {
+        if (logContainerRef.current) {
+            logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
+        }
+    }, [logs]);
 
     const handleMint = async () => {
         if (!data.trim()) return;
         
         try {
             setStatus("mining");
-            setLogs([]);
+            // Direct set to ensure UI updates before heavy work
+            setLogs([`> Initializing PoW sequence (Difficulty: 3)...`]);
             setProgress(0);
-            addLog("Initializing PoW sequence (Difficulty: 3)...");
             
+            // Critical yield to let React render the "mining" state and first log
+            await new Promise(r => setTimeout(r, 50));
+
             const startTime = performance.now();
-            await new Promise(r => setTimeout(r, 100));
             
             const { nonce, hash } = await mineNonce(data, 3, (count) => {
                 // Approximate progress for visual flair
@@ -352,6 +365,9 @@ function MintView({ onSuccess }) {
             setProgress(100);
             addLog(`Nonce found: ${nonce} (${mineTime}ms)`);
             addLog(`PoW Hash: ${hash.substring(0, 10)}...`);
+
+            // Yield again for smooth UI update
+            await new Promise(r => setTimeout(r, 10));
 
             setStatus("fingerprinting");
             addLog(`Querying Neural Oracle (Level: ${securityLevel.toUpperCase()})...`);
@@ -376,7 +392,7 @@ function MintView({ onSuccess }) {
                 created_at: new Date().toISOString()
             });
             
-            if (!record) throw new Error("Database commit failed - please check network");
+            if (!record) throw new Error("Database commit failed");
 
             addLog("SUCCESS: Block committed.");
             setTimeout(() => {
@@ -384,14 +400,14 @@ function MintView({ onSuccess }) {
             }, 1000);
 
         } catch (err) {
-            console.error(err);
+            console.error("Minting Error:", err);
             setStatus("idle");
             addLog(`CRITICAL FAILURE: ${err.message}`);
         }
     };
 
     return (
-        <div className="max-w-2xl mx-auto space-y-8">
+        <div className="max-w-2xl mx-auto space-y-6 md:space-y-8 pb-8">
             <header className="border-b border-subtle-border pb-4">
                 <h2 className="text-2xl font-bold text-white flex items-center gap-2">
                     <Lock className="text-neon-green" /> 
@@ -409,26 +425,26 @@ function MintView({ onSuccess }) {
                         value={data}
                         onChange={(e) => setData(e.target.value)}
                         placeholder='{"transaction": "transfer", "amount": 500, "to": "0x123..."}'
-                        className="w-full h-32 bg-dark-bg border border-subtle-border rounded p-4 text-white font-mono text-sm focus:border-neon-blue focus:outline-none focus:ring-1 focus:ring-neon-blue transition-all"
+                        className="w-full h-32 bg-dark-bg border border-subtle-border rounded p-4 text-white font-mono text-sm focus:border-neon-blue focus:outline-none focus:ring-1 focus:ring-neon-blue transition-all resize-none"
                         disabled={status !== 'idle'}
                     />
                 </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div className="grid grid-cols-3 gap-2 md:gap-4">
                     {['standard', 'high', 'maximum'].map(level => (
                         <button
                             key={level}
                             onClick={() => setSecurityLevel(level)}
                             disabled={status !== 'idle'}
                             className={cn(
-                                "p-3 rounded border text-xs font-mono uppercase text-left transition-all",
+                                "p-2 md:p-3 rounded border text-xs font-mono uppercase text-left transition-all",
                                 securityLevel === level 
                                     ? "bg-neon-blue/20 border-neon-blue text-white shadow-lg shadow-neon-blue/10" 
                                     : "bg-black/20 border-subtle-border text-gray-500 hover:border-gray-500"
                             )}
                         >
-                            <div className="font-bold mb-1">{level}</div>
-                            <div className="text-[10px] opacity-70">
+                            <div className="font-bold mb-1 truncate">{level}</div>
+                            <div className="text-[10px] opacity-70 hidden md:block">
                                 {level === 'standard' && "1 Query (Fast)"}
                                 {level === 'high' && "3 Queries (Robust)"}
                                 {level === 'maximum' && "5 Queries (Strict)"}
@@ -447,9 +463,13 @@ function MintView({ onSuccess }) {
                         <span>System Log</span>
                         <span>{status !== 'idle' && status.toUpperCase()}</span>
                     </div>
-                    <div className="space-y-1 h-24 overflow-y-auto custom-scrollbar">
+                    <div 
+                        ref={logContainerRef}
+                        className="space-y-1 h-24 overflow-y-auto custom-scrollbar scroll-smooth"
+                    >
+                        {logs.length === 0 && <span className="text-gray-700 italic">Ready for sequence start...</span>}
                         {logs.map((log, i) => (
-                            <div key={i} className="text-neon-green">{log}</div>
+                            <div key={i} className="text-neon-green break-all">{log}</div>
                         ))}
                     </div>
                 </div>
@@ -457,7 +477,7 @@ function MintView({ onSuccess }) {
                 <button 
                     onClick={handleMint}
                     disabled={status !== 'idle' || !data}
-                    className="w-full py-4 bg-neon-blue text-black font-bold font-mono text-lg uppercase tracking-wider hover:bg-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 rounded-sm"
+                    className="w-full py-4 bg-neon-blue text-black font-bold font-mono text-lg uppercase tracking-wider hover:bg-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 rounded-sm active:scale-[0.99]"
                 >
                     {status === 'idle' ? (
                         <>
@@ -789,58 +809,65 @@ function AvalancheStart({ onRun }) {
 }
 
 function AvalancheResults({ data, onReset }) {
-    // data: { hashA, hashB, diffBits, totalBits, diffPercent, visualDiff }
     return (
-        <div className="w-full max-w-4xl space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
-            <div className="flex flex-col md:flex-row gap-8 items-center justify-center">
-                <div className="flex-1 space-y-2 w-full">
-                    <div className="text-xs text-gray-500 font-mono">INPUT A: "{data.inputA}"</div>
-                    <div className="bg-black p-3 rounded border border-subtle-border font-mono text-xs break-all text-neon-blue">
+        <div className="w-full max-w-4xl space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="space-y-1">
+                    <div className="text-[10px] text-gray-500 font-mono">INPUT A (ORIGINAL)</div>
+                    <div className="bg-black/50 p-2 rounded border border-subtle-border font-mono text-[10px] break-all text-neon-blue">
                         {data.hashA}
                     </div>
                 </div>
-                <div className="text-gray-600 font-mono text-xs">VS</div>
-                <div className="flex-1 space-y-2 w-full">
-                    <div className="text-xs text-gray-500 font-mono">INPUT B: "{data.inputB}"</div>
-                    <div className="bg-black p-3 rounded border border-subtle-border font-mono text-xs break-all text-neon-pink">
+                <div className="space-y-1">
+                    <div className="text-[10px] text-gray-500 font-mono">INPUT B (1 BIT FLIP)</div>
+                    <div className="bg-black/50 p-2 rounded border border-subtle-border font-mono text-[10px] break-all text-neon-pink">
                         {data.hashB}
                     </div>
                 </div>
             </div>
 
-            <div className="bg-panel-bg border border-subtle-border p-6 rounded-lg">
-                <h4 className="text-sm font-bold text-white mb-4 flex items-center gap-2">
-                    <Activity size={16} className="text-neon-green" /> BIT DIFFERENCE MAP
-                </h4>
+            <div className="bg-panel-bg border border-subtle-border p-4 rounded-lg">
+                <div className="flex justify-between items-center mb-3">
+                    <h4 className="text-xs font-bold text-white flex items-center gap-2">
+                        <Activity size={14} className="text-neon-green" /> BITMAP VISUALIZER
+                    </h4>
+                    <div className="text-xs font-mono">
+                        <span className="text-neon-pink">{data.diffBits}</span> <span className="text-gray-600">/</span> <span className="text-gray-400">{data.totalBits}</span>
+                    </div>
+                </div>
                 
-                {/* Visualizer */}
-                <div className="grid grid-cols-16 gap-1 mb-4">
+                {/* Visualizer - Compact Grid */}
+                <div className="flex flex-wrap gap-[1px] mb-4 bg-black/20 p-2 rounded justify-center">
                     {data.visualDiff.map((bit, i) => (
                         <div 
                             key={i} 
                             className={cn(
-                                "aspect-square rounded-sm transition-all duration-500",
-                                bit ? "bg-neon-pink scale-90" : "bg-gray-800 scale-100"
+                                "w-1.5 h-1.5 md:w-2 md:h-2 rounded-[1px] transition-all duration-300",
+                                bit ? "bg-neon-pink" : "bg-gray-800"
                             )}
-                            title={bit ? "Changed" : "Same"}
+                            title={`Bit ${i}: ${bit ? "CHANGED" : "SAME"}`}
                         ></div>
                     ))}
                 </div>
 
-                <div className="flex justify-between items-end">
+                <div className="flex items-center justify-between border-t border-subtle-border pt-3">
                     <div>
-                        <div className="text-3xl font-bold text-white">{data.diffPercent}%</div>
-                        <div className="text-xs text-gray-500">DIFFERENCE</div>
+                        <div className="text-2xl font-bold text-white leading-none">{data.diffPercent}%</div>
+                        <div className="text-[10px] text-gray-500 uppercase">Avalanche Factor</div>
                     </div>
-                    <div className="text-right text-xs text-gray-500 max-w-[200px]">
-                        Target is ~50%. <br/>
-                        {data.diffPercent > 40 ? "Excellent Avalanche Effect." : "Weak Avalanche Effect."}
+                    <div className="text-right">
+                        <div className={cn("text-xs font-bold", data.diffPercent > 45 ? "text-neon-green" : "text-yellow-500")}>
+                            {data.diffPercent > 45 ? "STRONG CRYPTO PROPERTY" : "WEAK CORRELATION"}
+                        </div>
+                        <div className="text-[10px] text-gray-500">
+                             {data.diffPercent > 45 ? "Outputs are uncorrelated." : "Model may be overfitting."}
+                        </div>
                     </div>
                 </div>
             </div>
             
-            <div className="mt-6 text-center">
-                <button onClick={onReset} className="text-gray-500 hover:text-white text-sm underline">Run Another Test</button>
+            <div className="mt-4 text-center">
+                <button onClick={onReset} className="text-xs text-gray-500 hover:text-white underline">Run New Experiment</button>
             </div>
         </div>
     );

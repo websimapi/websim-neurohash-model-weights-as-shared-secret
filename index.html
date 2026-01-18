@@ -127,8 +127,8 @@
     </script>
     <script src="https://cdn.jsdelivr.net/npm/@babel/standalone/babel.min.js"></script>
 </head>
-<body>
-    <div id="root"></div>
+<body class="overflow-hidden"> <!-- Prevent body scroll for app-like feel -->
+    <div id="root" class="h-screen w-screen overflow-hidden"></div>
 
     <!-- Application Logic -->
     <script type="text/babel" data-type="module" src="./app.js"></script>

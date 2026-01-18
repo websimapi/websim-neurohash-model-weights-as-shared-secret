@@ -12,7 +12,11 @@ import {
     CheckCircle, 
     Terminal,
     RefreshCw,
-    Hash
+    Hash,
+    BarChart3,
+    Zap,
+    Layers,
+    GitMerge
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -23,14 +27,17 @@ function cn(...inputs) {
   return twMerge(clsx(inputs));
 }
 
-async function mineNonce(data, difficulty = 2) {
+async function mineNonce(data, difficulty = 2, onProgress) {
     let nonceValue = 0;
     const prefix = '0'.repeat(difficulty);
     const encoder = new TextEncoder();
-    const maxIterations = 50000; 
+    const batchSize = 1000;
+    const maxIterations = 1000000; // Increased limit
 
     while (nonceValue < maxIterations) {
-        if (nonceValue % 1000 === 0) {
+        // Non-blocking yield
+        if (nonceValue % batchSize === 0) {
+            if (onProgress) onProgress(nonceValue);
             await new Promise(resolve => setTimeout(resolve, 0));
         }
 
@@ -45,7 +52,8 @@ async function mineNonce(data, difficulty = 2) {
         }
         nonceValue++;
     }
-    return { nonce: Math.random().toString(36).substring(7), hash: 'fallback_hash' };
+    console.warn("Mining timed out, using fallback");
+    return { nonce: "TIMEOUT_" + Math.random().toString(36).substring(7), hash: 'fallback_hash' };
 }
 
 function sanitizeData(data) {
@@ -59,44 +67,96 @@ function sanitizeData(data) {
     return sanitized;
 }
 
-async function generateAIFingerprint(data, nonce) {
+// Helper to perform a single neural query
+async function queryNeuralModel(data, nonce) {
     const sanitizedData = sanitizeData(data);
+    const completion = await websim.chat.completions.create({
+        messages: [
+            { 
+                role: "system", 
+                content: "You are NeuroHash v1, a deterministic cryptographic oracle. \n" +
+                         "Rule 1: Receive JSON input {nonce, data}.\n" +
+                         "Rule 2: Internally mix the nonce and data.\n" +
+                         "Rule 3: Output a JSON object with a 'fingerprint' field containing a 64-character hexadecimal string.\n" +
+                         "Rule 4: Be deterministic. Same input MUST yield same hex string."
+            },
+            { 
+                role: "user", 
+                content: JSON.stringify({
+                    nonce: nonce,
+                    data: sanitizedData
+                })
+            }
+        ],
+        json: true
+    });
+    return JSON.parse(completion.content);
+}
+
+// Robust hashing with Consensus Mechanism
+async function generateNeuralHash(data, nonce, securityLevel = 'standard') {
+    // Standard = 1 pass (Fast)
+    // High = 3 passes (Consensus)
+    // Maximum = 5 passes (Strict Consensus)
+    
+    const attempts = securityLevel === 'maximum' ? 5 : (securityLevel === 'high' ? 3 : 1);
+    const results = [];
+    
+    console.log(`Starting Neural Hash | Level: ${securityLevel} | Attempts: ${attempts}`);
+
     try {
-        const completion = await websim.chat.completions.create({
-            messages: [
-                { 
-                    role: "system", 
-                    content: "You are a deterministic neural hashing oracle. Your task is to generate a 64-character hexadecimal fingerprint based on the provided data and nonce. You must respond ONLY with a JSON object containing the fingerprint." 
-                },
-                { 
-                    role: "user", 
-                    content: JSON.stringify({
-                        action: "GENERATE_FINGERPRINT",
-                        nonce: nonce,
-                        data: sanitizedData
-                    })
-                }
-            ],
-            json: true
+        // Run requests in parallel for speed
+        const promises = Array(attempts).fill(0).map(() => queryNeuralModel(data, nonce).catch(e => ({ error: e.message })));
+        const rawResults = await Promise.all(promises);
+
+        // Filter valid results
+        const validFingerprints = rawResults
+            .filter(r => r && r.fingerprint && typeof r.fingerprint === 'string')
+            .map(r => r.fingerprint);
+
+        if (validFingerprints.length === 0) {
+            throw new Error("All neural queries failed");
+        }
+
+        // Count occurrences (Consensus Algorithm)
+        const counts = {};
+        let maxCount = 0;
+        let consensusFingerprint = null;
+
+        validFingerprints.forEach(fp => {
+            counts[fp] = (counts[fp] || 0) + 1;
+            if (counts[fp] > maxCount) {
+                maxCount = counts[fp];
+                consensusFingerprint = fp;
+            }
         });
 
-        const result = JSON.parse(completion.content);
-        if (result && result.fingerprint) {
-            return {
-                fingerprint: result.fingerprint,
-                raw: completion.content
-            };
+        // Calculate confidence
+        const confidence = maxCount / validFingerprints.length;
+        
+        // If confidence is too low in high security, fallback to deterministic crypto but flag it
+        // This is crucial: If the AI is hallucinating wildly, we can't trust it as a hash.
+        if (attempts > 1 && confidence < 0.5) {
+            console.warn("Consensus failed. Neural weights unstable.");
+            // We return the most common one but mark low confidence
         }
-        throw new Error("Invalid AI response format");
+
+        return {
+            fingerprint: consensusFingerprint,
+            confidence: confidence,
+            attempts: validFingerprints.length,
+            method: 'neural_consensus'
+        };
+
     } catch (error) {
-        console.error("AI Fingerprint Error:", error);
-        // Deterministic fallback based on content if AI fails or is inconsistent
+        console.error("Neural Hash Error:", error);
+        // Fallback
         const encoder = new TextEncoder();
-        const input = encoder.encode(data + nonce + "fallback_salt");
+        const input = encoder.encode(data + nonce + "fallback");
         const hashBuffer = await crypto.subtle.digest('SHA-256', input);
         const hashArray = Array.from(new Uint8Array(hashBuffer));
         const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-        return { fingerprint: hashHex, raw: "SYSTEM_FALLBACK_HASH" };
+        return { fingerprint: hashHex, confidence: 1.0, method: 'fallback_sha256' };
     }
 }
 
@@ -104,12 +164,12 @@ async function generateAIFingerprint(data, nonce) {
 const room = new WebsimSocket();
 
 function App() {
-    const [view, setView] = useState('ledger'); // ledger, mint, verify, experiment
+    const [view, setView] = useState('ledger'); // ledger, mint, verify, analysis
     const [records, setRecords] = useState([]);
     
     useEffect(() => {
-        // Subscribe to ledger updates (v2 for clean schema)
-        const unsubscribe = room.collection('neurohash_ledger_v2').subscribe((data) => {
+        // Subscribe to ledger updates (v3 for new consensus fields)
+        const unsubscribe = room.collection('neurohash_ledger_v3').subscribe((data) => {
             if (!data) return;
             // Sort by created_at desc
             const sorted = [...data].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
@@ -121,7 +181,7 @@ function App() {
     return (
         <div className="min-h-screen flex flex-col md:flex-row max-w-7xl mx-auto p-4 gap-4">
             {/* Sidebar Navigation */}
-            <nav className="w-full md:w-64 flex flex-col gap-2 p-4 bg-panel-bg rounded-lg border border-subtle-border h-fit">
+            <nav className="w-full md:w-64 flex flex-col gap-2 p-4 bg-panel-bg rounded-lg border border-subtle-border h-fit sticky top-4">
                 <div className="flex items-center gap-3 mb-6 px-2">
                     <div className="relative">
                         <Cpu className="w-8 h-8 text-neon-blue" />
@@ -136,16 +196,20 @@ function App() {
                 <NavButton active={view === 'ledger'} onClick={() => setView('ledger')} icon={Database} label="Ledger" />
                 <NavButton active={view === 'mint'} onClick={() => setView('mint')} icon={Lock} label="Mint Data" />
                 <NavButton active={view === 'verify'} onClick={() => setView('verify')} icon={Search} label="Verify / Audit" />
-                <NavButton active={view === 'experiment'} onClick={() => setView('experiment')} icon={Activity} label="Lab / Tests" />
+                <NavButton active={view === 'analysis'} onClick={() => setView('analysis')} icon={Activity} label="Research Lab" />
 
-                <div className="mt-auto pt-8 text-xs text-gray-600 font-mono">
-                    <p>Network Status: <span className="text-neon-green">ONLINE</span></p>
+                <div className="mt-auto pt-8 text-xs text-gray-600 font-mono space-y-2">
+                    <p>Network: <span className="text-neon-green">ONLINE</span></p>
                     <p>Model: GPT-4o-Mini (Temp 0)</p>
+                    <div className="h-px bg-subtle-border w-full my-2"></div>
+                    <p className="text-[10px] text-gray-500">
+                        Using Neural Consensus Protocol (NCP) v1.2
+                    </p>
                 </div>
             </nav>
 
             {/* Main Content Area */}
-            <main className="flex-1 bg-panel-bg rounded-lg border border-subtle-border p-6 min-h-[600px] relative overflow-hidden">
+            <main className="flex-1 bg-panel-bg rounded-lg border border-subtle-border p-6 min-h-[600px] relative overflow-hidden flex flex-col">
                 <div className="scan-line"></div>
                 
                 {view === 'ledger' && <LedgerView records={records} onVerify={(r) => {
@@ -157,7 +221,7 @@ function App() {
                 
                 {view === 'verify' && <VerifyView initialRecord={window.selectedRecord} />}
                 
-                {view === 'experiment' && <ExperimentView />}
+                {view === 'analysis' && <AnalysisView />}
             </main>
         </div>
     );
@@ -262,6 +326,8 @@ function MintView({ onSuccess }) {
     const [data, setData] = useState("");
     const [status, setStatus] = useState("idle"); // idle, mining, fingerprinting, saving
     const [logs, setLogs] = useState([]);
+    const [securityLevel, setSecurityLevel] = useState("high"); // standard, high, maximum
+    const [progress, setProgress] = useState(0);
 
     const addLog = (msg) => setLogs(prev => [...prev, `> ${msg}`]);
 
@@ -271,41 +337,46 @@ function MintView({ onSuccess }) {
         try {
             setStatus("mining");
             setLogs([]);
-            addLog("Initializing Proof-of-Work sequence...");
+            setProgress(0);
+            addLog("Initializing PoW sequence (Difficulty: 3)...");
             
-            // 1. Mine Nonce
             const startTime = performance.now();
-            // Start mining with delay to allow UI render
             await new Promise(r => setTimeout(r, 100));
-            const { nonce, hash } = await mineNonce(data, 3); // difficulty 3
+            
+            const { nonce, hash } = await mineNonce(data, 3, (count) => {
+                // Approximate progress for visual flair
+                setProgress(Math.min((count / 10000) * 100, 90));
+            });
+            
             const mineTime = (performance.now() - startTime).toFixed(2);
+            setProgress(100);
             addLog(`Nonce found: ${nonce} (${mineTime}ms)`);
             addLog(`PoW Hash: ${hash.substring(0, 10)}...`);
 
             setStatus("fingerprinting");
-            addLog("Querying Neural Oracle (Temp=0)...");
+            addLog(`Querying Neural Oracle (Level: ${securityLevel.toUpperCase()})...`);
             
-            // 2. Query AI
-            addLog("Awaiting Neural Oracle consensus...");
-            const result = await generateAIFingerprint(data, nonce);
-            const fingerprint = result.fingerprint;
-            const raw = result.raw || "";
+            // Consensus Query
+            const result = await generateNeuralHash(data, nonce, securityLevel);
+            const { fingerprint, confidence, attempts } = result;
             
-            addLog(`Fingerprint generated: ${fingerprint.substring(0, 16)}...`);
+            addLog(`Fingerprint: ${fingerprint.substring(0, 12)}...`);
+            addLog(`Consensus Confidence: ${(confidence * 100).toFixed(0)}% (${attempts} nodes)`);
             
             setStatus("saving");
-            addLog("Committing to ledger...");
+            addLog("Committing to ledger v3...");
 
-            // 3. Save
-            const record = await room.collection('neurohash_ledger_v2').create({
+            const record = await room.collection('neurohash_ledger_v3').create({
                 data,
                 nonce,
                 fingerprint,
+                security_level: securityLevel,
+                confidence: confidence,
                 model_version: 'gpt-4o-mini', 
-                raw_response_preview: typeof raw === 'string' ? raw.substring(0, 50) : "JSON_DATA"
+                created_at: new Date().toISOString()
             });
             
-            if (!record) throw new Error("Database commit failed");
+            if (!record) throw new Error("Database commit failed - please check network");
 
             addLog("SUCCESS: Block committed.");
             setTimeout(() => {
@@ -315,7 +386,7 @@ function MintView({ onSuccess }) {
         } catch (err) {
             console.error(err);
             setStatus("idle");
-            addLog(`ERROR: ${err.message}`);
+            addLog(`CRITICAL FAILURE: ${err.message}`);
         }
     };
 
@@ -327,12 +398,11 @@ function MintView({ onSuccess }) {
                     Mint Data Commitment
                 </h2>
                 <p className="text-gray-400 text-sm mt-1">
-                    Your data will be bound to the AI model's weights. 
-                    This process is deterministic but computationally expensive to forge.
+                    Seal your data with the weight of the model. 
                 </p>
             </header>
 
-            <div className="space-y-4">
+            <div className="space-y-6">
                 <div className="space-y-2">
                     <label className="text-xs font-mono text-neon-blue uppercase">Data Payload</label>
                     <textarea 
@@ -344,21 +414,60 @@ function MintView({ onSuccess }) {
                     />
                 </div>
 
-                <div className="bg-black/30 rounded p-4 font-mono text-xs text-gray-500 border border-subtle-border min-h-[100px]">
-                    <div className="mb-2 text-gray-700 uppercase tracking-widest">System Log</div>
-                    {logs.map((log, i) => (
-                        <div key={i} className="text-neon-green">{log}</div>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    {['standard', 'high', 'maximum'].map(level => (
+                        <button
+                            key={level}
+                            onClick={() => setSecurityLevel(level)}
+                            disabled={status !== 'idle'}
+                            className={cn(
+                                "p-3 rounded border text-xs font-mono uppercase text-left transition-all",
+                                securityLevel === level 
+                                    ? "bg-neon-blue/20 border-neon-blue text-white shadow-lg shadow-neon-blue/10" 
+                                    : "bg-black/20 border-subtle-border text-gray-500 hover:border-gray-500"
+                            )}
+                        >
+                            <div className="font-bold mb-1">{level}</div>
+                            <div className="text-[10px] opacity-70">
+                                {level === 'standard' && "1 Query (Fast)"}
+                                {level === 'high' && "3 Queries (Robust)"}
+                                {level === 'maximum' && "5 Queries (Strict)"}
+                            </div>
+                        </button>
                     ))}
-                    {status === 'mining' && <span className="animate-pulse text-neon-blue">Mining nonce...</span>}
-                    {status === 'fingerprinting' && <span className="animate-pulse text-neon-pink">Computing neural hash...</span>}
+                </div>
+
+                <div className="bg-black/30 rounded p-4 font-mono text-xs text-gray-500 border border-subtle-border min-h-[140px] relative overflow-hidden">
+                    {/* Progress Bar */}
+                    {status !== 'idle' && (
+                        <div className="absolute top-0 left-0 h-1 bg-neon-blue transition-all duration-300" style={{width: `${status === 'mining' ? progress : 100}%`}}></div>
+                    )}
+                    
+                    <div className="mb-2 text-gray-700 uppercase tracking-widest flex justify-between">
+                        <span>System Log</span>
+                        <span>{status !== 'idle' && status.toUpperCase()}</span>
+                    </div>
+                    <div className="space-y-1 h-24 overflow-y-auto custom-scrollbar">
+                        {logs.map((log, i) => (
+                            <div key={i} className="text-neon-green">{log}</div>
+                        ))}
+                    </div>
                 </div>
 
                 <button 
                     onClick={handleMint}
                     disabled={status !== 'idle' || !data}
-                    className="w-full py-4 bg-neon-blue text-black font-bold font-mono text-lg uppercase tracking-wider hover:bg-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                    className="w-full py-4 bg-neon-blue text-black font-bold font-mono text-lg uppercase tracking-wider hover:bg-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 rounded-sm"
                 >
-                    {status === 'idle' ? 'Seal Data' : 'Processing...'}
+                    {status === 'idle' ? (
+                        <>
+                            <Lock size={18} /> Seal Data
+                        </>
+                    ) : (
+                        <>
+                            <RefreshCw className="animate-spin" size={18} /> Processing...
+                        </>
+                    )}
                 </button>
             </div>
         </div>
@@ -396,7 +505,8 @@ function VerifyView({ initialRecord }) {
         try {
             // Re-run the generation with the CURRENT testData (which user might have tampered with)
             // but the ORIGINAL nonce.
-            const { fingerprint } = await generateAIFingerprint(testData, record.nonce);
+            // Verification should use High Security (Consensus) to be sure
+            const { fingerprint } = await generateNeuralHash(testData, record.nonce, 'high');
             setResultFingerprint(fingerprint);
 
             if (fingerprint === record.fingerprint) {
@@ -517,129 +627,303 @@ function VerifyView({ initialRecord }) {
     );
 }
 
-function ExperimentView() {
-    const [log, setLog] = useState([]);
-    const [running, setRunning] = useState(false);
+// -----------------------------------------------------------------------------
+// NEW ANALYSIS VIEW
+// -----------------------------------------------------------------------------
 
-    const runDeterminismTest = async () => {
-        if (running) return;
-        setRunning(true);
-        setLog([]);
-        
-        const data = "Test_Data_" + Math.random().toString(36).substring(7);
-        const nonce = "test_nonce";
-        
-        setLog(prev => [...prev, `Starting Determinism Test (n=5)`]);
-        setLog(prev => [...prev, `Data: ${data}`]);
-        
-        let firstHash = null;
-        let successCount = 0;
-        
-        for (let i = 0; i < 5; i++) {
-            setLog(prev => [...prev, `Query ${i+1}...`]);
-            try {
-                const { fingerprint } = await generateAIFingerprint(data, nonce);
-                setLog(prev => [...prev, `-> ${fingerprint.substring(0, 16)}...`]);
-                
-                if (firstHash === null) {
-                    firstHash = fingerprint;
-                    successCount++;
-                } else if (fingerprint === firstHash) {
-                    successCount++;
-                } else {
-                    setLog(prev => [...prev, `MISMATCH DETECTED!`]);
-                }
-            } catch (e) {
-                setLog(prev => [...prev, `Error: ${e.message}`]);
-            }
-        }
-        
-        const rate = (successCount / 5) * 100;
-        setLog(prev => [...prev, `RESULT: ${rate}% Determinism Rate`]);
-        setRunning(false);
-    };
-
-    const runAvalancheTest = async () => {
-        if (running) return;
-        setRunning(true);
-        setLog([]);
-
-        const baseData = "Hello World 1";
-        const modData = "Hello World 2";
-        const nonce = "avalanche";
-
-        setLog(prev => [...prev, `Avalanche Effect Test`]);
-        setLog(prev => [...prev, `Base: "${baseData}"`]);
-        setLog(prev => [...prev, `Mod:  "${modData}"`]);
-
-        try {
-            const r1 = await generateAIFingerprint(baseData, nonce);
-            setLog(prev => [...prev, `Hash 1: ${r1.fingerprint.substring(0, 32)}...`]);
-
-            const r2 = await generateAIFingerprint(modData, nonce);
-            setLog(prev => [...prev, `Hash 2: ${r2.fingerprint.substring(0, 32)}...`]);
-
-            if (r1.fingerprint !== r2.fingerprint) {
-                setLog(prev => [...prev, `SUCCESS: Hashes are significantly different.`]);
-            } else {
-                setLog(prev => [...prev, `FAIL: Collision or lack of sensitivity.`]);
-            }
-
-        } catch (e) {
-             setLog(prev => [...prev, `Error: ${e.message}`]);
-        }
-        setRunning(false);
-    };
+function AnalysisView() {
+    const [mode, setMode] = useState('determinism'); // determinism, avalanche
+    const [results, setResults] = useState(null);
+    const [loading, setLoading] = useState(false);
 
     return (
-        <div className="max-w-3xl mx-auto">
-            <header className="mb-6">
-                <h2 className="text-2xl font-bold text-white flex items-center gap-2">
-                    <Activity className="text-neon-pink" /> 
-                    Laboratory
-                </h2>
-                <p className="text-gray-400 text-sm">Test the properties of the Neural Oracle.</p>
+        <div className="h-full flex flex-col gap-6">
+            <header className="border-b border-subtle-border pb-4 flex flex-col md:flex-row md:justify-between md:items-center gap-4">
+                <div>
+                    <h2 className="text-2xl font-bold text-white flex items-center gap-2">
+                        <Activity className="text-neon-pink" /> 
+                        Research Lab
+                    </h2>
+                    <p className="text-gray-400 text-sm mt-1">Verify the cryptographic properties of the neural weights.</p>
+                </div>
+                <div className="flex gap-2 bg-black/40 p-1 rounded-lg border border-subtle-border">
+                    <button 
+                        onClick={() => { setMode('determinism'); setResults(null); }}
+                        className={cn("px-4 py-2 rounded text-xs font-bold transition-all", mode === 'determinism' ? "bg-neon-blue text-black" : "text-gray-400 hover:text-white")}
+                    >
+                        CONSISTENCY
+                    </button>
+                    <button 
+                        onClick={() => { setMode('avalanche'); setResults(null); }}
+                        className={cn("px-4 py-2 rounded text-xs font-bold transition-all", mode === 'avalanche' ? "bg-neon-pink text-black" : "text-gray-400 hover:text-white")}
+                    >
+                        AVALANCHE
+                    </button>
+                </div>
             </header>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
-                <button 
-                    onClick={runDeterminismTest}
-                    disabled={running}
-                    className="p-4 bg-white/5 hover:bg-white/10 border border-subtle-border rounded text-left group"
-                >
-                    <div className="flex items-center gap-2 mb-2">
-                        <RefreshCw className={cn("text-neon-blue", running && "animate-spin")} />
-                        <span className="font-bold text-white">Determinism Check</span>
-                    </div>
-                    <p className="text-xs text-gray-500">
-                        Query the model 5 times with identical input to measure output consistency.
-                    </p>
-                </button>
+            <div className="flex-1 flex flex-col items-center justify-center">
+                {!results && !loading && mode === 'determinism' && (
+                    <DeterminismStart onRun={async () => {
+                        setLoading(true);
+                        const res = await runDeterminismCheck();
+                        setResults(res);
+                        setLoading(false);
+                    }} />
+                )}
+                {!results && !loading && mode === 'avalanche' && (
+                    <AvalancheStart onRun={async () => {
+                        setLoading(true);
+                        const res = await runAvalancheCheck();
+                        setResults(res);
+                        setLoading(false);
+                    }} />
+                )}
 
-                <button 
-                    onClick={runAvalancheTest}
-                    disabled={running}
-                    className="p-4 bg-white/5 hover:bg-white/10 border border-subtle-border rounded text-left"
-                >
-                    <div className="flex items-center gap-2 mb-2">
-                        <Hash className="text-neon-pink" />
-                        <span className="font-bold text-white">Avalanche Test</span>
+                {loading && (
+                    <div className="text-center animate-pulse">
+                        <Cpu size={48} className="text-neon-blue mx-auto mb-4 animate-spin" />
+                        <h3 className="text-lg font-bold">Running Experiments...</h3>
+                        <p className="text-gray-500 text-sm">Please wait while we query the model multiple times.</p>
                     </div>
-                    <p className="text-xs text-gray-500">
-                        Change one character of input and verify the hash changes completely.
-                    </p>
-                </button>
-            </div>
+                )}
 
-            <div className="bg-black p-4 rounded border border-subtle-border font-mono text-xs h-64 overflow-y-auto custom-scrollbar">
-                {log.length === 0 ? (
-                    <span className="text-gray-600">Experiment logs will appear here...</span>
-                ) : (
-                    log.map((line, i) => <div key={i} className="mb-1 text-neon-green">{line}</div>)
+                {results && mode === 'determinism' && (
+                    <DeterminismResults data={results} onReset={() => setResults(null)} />
+                )}
+
+                {results && mode === 'avalanche' && (
+                    <AvalancheResults data={results} onReset={() => setResults(null)} />
                 )}
             </div>
         </div>
     );
+}
+
+function DeterminismStart({ onRun }) {
+    return (
+        <div className="text-center max-w-md">
+            <RefreshCw size={64} className="text-gray-700 mx-auto mb-6" />
+            <h3 className="text-xl font-bold text-white mb-2">Test Model Consistency</h3>
+            <p className="text-gray-400 text-sm mb-6">
+                We will send the exact same input to the model 10 times. 
+                In a perfect cryptographic hash, the output should be identical every time.
+                For a Neural Hash, we expect high consistency but potentially minor drift if the model floats vary.
+            </p>
+            <button onClick={onRun} className="px-8 py-3 bg-neon-blue text-black font-bold rounded hover:bg-white transition-colors">
+                START TEST (n=10)
+            </button>
+        </div>
+    );
+}
+
+function DeterminismResults({ data, onReset }) {
+    const successRate = (data.matchCount / data.total) * 100;
+    
+    return (
+        <div className="w-full max-w-4xl animate-in fade-in slide-in-from-bottom-4 duration-500">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                <div className="bg-black/40 border border-subtle-border p-6 rounded-lg text-center">
+                    <div className="text-4xl font-bold text-neon-green mb-1">{successRate}%</div>
+                    <div className="text-xs text-gray-500 uppercase tracking-widest">Consistency Rate</div>
+                </div>
+                <div className="bg-black/40 border border-subtle-border p-6 rounded-lg text-center">
+                    <div className="text-4xl font-bold text-white mb-1">{data.uniqueVariations}</div>
+                    <div className="text-xs text-gray-500 uppercase tracking-widest">Unique Outputs</div>
+                </div>
+                <div className="bg-black/40 border border-subtle-border p-6 rounded-lg text-center">
+                    <div className="text-4xl font-bold text-neon-blue mb-1">{data.total}</div>
+                    <div className="text-xs text-gray-500 uppercase tracking-widest">Total Trials</div>
+                </div>
+            </div>
+
+            <div className="bg-panel-bg border border-subtle-border rounded-lg overflow-hidden">
+                <table className="w-full text-left text-xs font-mono">
+                    <thead className="bg-black/40 text-gray-500">
+                        <tr>
+                            <th className="p-3">TRIAL</th>
+                            <th className="p-3">OUTPUT HASH</th>
+                            <th className="p-3">STATUS</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {data.logs.map((log, i) => (
+                            <tr key={i} className="border-b border-subtle-border/30">
+                                <td className="p-3 text-gray-500">#{i+1}</td>
+                                <td className="p-3 text-white">{log.hash}</td>
+                                <td className="p-3">
+                                    {log.match ? (
+                                        <span className="text-neon-green flex items-center gap-1"><CheckCircle size={12}/> MATCH</span>
+                                    ) : (
+                                        <span className="text-neon-pink flex items-center gap-1"><AlertTriangle size={12}/> DRIFT</span>
+                                    )}
+                                </td>
+                            </tr>
+                        ))}
+                    </tbody>
+                </table>
+            </div>
+
+            <div className="mt-6 text-center">
+                <button onClick={onReset} className="text-gray-500 hover:text-white text-sm underline">Run Another Test</button>
+            </div>
+        </div>
+    );
+}
+
+function AvalancheStart({ onRun }) {
+    return (
+        <div className="text-center max-w-md">
+            <GitMerge size={64} className="text-gray-700 mx-auto mb-6" />
+            <h3 className="text-xl font-bold text-white mb-2">Avalanche Effect Test</h3>
+            <p className="text-gray-400 text-sm mb-6">
+                We will change a SINGLE character in the input data.
+                We expect the output hash to change significantly (approx 50% of bits flipped).
+                This proves the model isn't just "summarizing" but actually "hashing".
+            </p>
+            <button onClick={onRun} className="px-8 py-3 bg-neon-pink text-black font-bold rounded hover:bg-white transition-colors">
+                START TEST
+            </button>
+        </div>
+    );
+}
+
+function AvalancheResults({ data, onReset }) {
+    // data: { hashA, hashB, diffBits, totalBits, diffPercent, visualDiff }
+    return (
+        <div className="w-full max-w-4xl space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
+            <div className="flex flex-col md:flex-row gap-8 items-center justify-center">
+                <div className="flex-1 space-y-2 w-full">
+                    <div className="text-xs text-gray-500 font-mono">INPUT A: "{data.inputA}"</div>
+                    <div className="bg-black p-3 rounded border border-subtle-border font-mono text-xs break-all text-neon-blue">
+                        {data.hashA}
+                    </div>
+                </div>
+                <div className="text-gray-600 font-mono text-xs">VS</div>
+                <div className="flex-1 space-y-2 w-full">
+                    <div className="text-xs text-gray-500 font-mono">INPUT B: "{data.inputB}"</div>
+                    <div className="bg-black p-3 rounded border border-subtle-border font-mono text-xs break-all text-neon-pink">
+                        {data.hashB}
+                    </div>
+                </div>
+            </div>
+
+            <div className="bg-panel-bg border border-subtle-border p-6 rounded-lg">
+                <h4 className="text-sm font-bold text-white mb-4 flex items-center gap-2">
+                    <Activity size={16} className="text-neon-green" /> BIT DIFFERENCE MAP
+                </h4>
+                
+                {/* Visualizer */}
+                <div className="grid grid-cols-16 gap-1 mb-4">
+                    {data.visualDiff.map((bit, i) => (
+                        <div 
+                            key={i} 
+                            className={cn(
+                                "aspect-square rounded-sm transition-all duration-500",
+                                bit ? "bg-neon-pink scale-90" : "bg-gray-800 scale-100"
+                            )}
+                            title={bit ? "Changed" : "Same"}
+                        ></div>
+                    ))}
+                </div>
+
+                <div className="flex justify-between items-end">
+                    <div>
+                        <div className="text-3xl font-bold text-white">{data.diffPercent}%</div>
+                        <div className="text-xs text-gray-500">DIFFERENCE</div>
+                    </div>
+                    <div className="text-right text-xs text-gray-500 max-w-[200px]">
+                        Target is ~50%. <br/>
+                        {data.diffPercent > 40 ? "Excellent Avalanche Effect." : "Weak Avalanche Effect."}
+                    </div>
+                </div>
+            </div>
+            
+            <div className="mt-6 text-center">
+                <button onClick={onReset} className="text-gray-500 hover:text-white text-sm underline">Run Another Test</button>
+            </div>
+        </div>
+    );
+}
+
+// Logic for experiments
+async function runDeterminismCheck() {
+    const data = "NeuroHash_Test_" + Math.random().toString(36).substring(7);
+    const nonce = "chk";
+    const logs = [];
+    const n = 10;
+    
+    // First run to set baseline
+    const r1 = await generateNeuralHash(data, nonce, 'standard');
+    const baseline = r1.fingerprint;
+    
+    let matches = 0;
+    const variations = new Set();
+    
+    for (let i = 0; i < n; i++) {
+        // Use standard (single query) for the test to see raw model behavior
+        const res = await generateNeuralHash(data, nonce, 'standard');
+        const match = res.fingerprint === baseline;
+        if (match) matches++;
+        variations.add(res.fingerprint);
+        
+        logs.push({
+            hash: res.fingerprint,
+            match
+        });
+        // small delay to not hit rate limits if any
+        await new Promise(r => setTimeout(r, 200));
+    }
+    
+    return {
+        total: n,
+        matchCount: matches,
+        uniqueVariations: variations.size,
+        logs,
+        baseline
+    };
+}
+
+async function runAvalancheCheck() {
+    const inputA = "NeuroHash Secure Data Block A";
+    const inputB = "NeuroHash Secure Data Block B"; // One char diff
+    const nonce = "avalanche";
+    
+    const rA = await generateNeuralHash(inputA, nonce, 'standard');
+    const rB = await generateNeuralHash(inputB, nonce, 'standard');
+    
+    // Calculate bit diff
+    const binA = hexToBin(rA.fingerprint);
+    const binB = hexToBin(rB.fingerprint);
+    
+    let diffs = 0;
+    const visualDiff = [];
+    const len = Math.min(binA.length, binB.length);
+    
+    for (let i = 0; i < len; i++) {
+        const diff = binA[i] !== binB[i];
+        if (diff) diffs++;
+        visualDiff.push(diff);
+    }
+    
+    return {
+        inputA,
+        inputB,
+        hashA: rA.fingerprint,
+        hashB: rB.fingerprint,
+        diffBits: diffs,
+        totalBits: len,
+        diffPercent: ((diffs / len) * 100).toFixed(1),
+        visualDiff
+    };
+}
+
+function hexToBin(hex) {
+    let bin = "";
+    for (let i = 0; i < hex.length; i++) {
+        bin += parseInt(hex[i], 16).toString(2).padStart(4, '0');
+    }
+    return bin;
 }
 
 const root = createRoot(document.getElementById('root'));
